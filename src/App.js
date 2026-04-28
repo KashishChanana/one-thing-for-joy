@@ -792,7 +792,6 @@ export default function App() {
   const daily = getDailySelection(todayKey);
   const featured = daily[0];
   const alts = daily.slice(1);
-  const todayLog = log[todayKey] || [];
   const isDone = useCallback((p) => {
     const tlog = log[todayKey] || [];
     return tlog.some(e => e.id === p.id);

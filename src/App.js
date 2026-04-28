@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { supabase } from './supabase';
 
 // ─── PALETTE ──────────────────────────────────────────────────────────────────
 const P = {
@@ -91,30 +92,35 @@ function seededShuffle(arr, seed) {
 }
 function getDailySelection(key) { return seededShuffle(ALL_PRACTICES, strHash(key)).slice(0, 12); }
 
-// ─── Auth Storage (simulates real auth — swap for Supabase/Firebase in prod) ──
-function loadAuth() {
-  try {
-    const raw = localStorage.getItem("otj_auth");
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
+// ─── Supabase Auth & Log Helpers ──────────────────────────────────────────────
+function mapUser(u) {
+  if (!u) return null;
+  return {
+    uid: u.id,
+    name: u.user_metadata?.full_name || u.user_metadata?.name || u.email?.split('@')[0] || 'User',
+    email: u.email,
+    avatar: u.user_metadata?.avatar_url || null,
+    provider: u.app_metadata?.provider || 'email',
+    createdAt: u.created_at,
+  };
 }
-function saveAuth(user) {
-  try {
-    if (user) localStorage.setItem("otj_auth", JSON.stringify(user));
-    else localStorage.removeItem("otj_auth");
-  } catch { }
+
+async function fetchLog(uid) {
+  const { data } = await supabase
+    .from('practice_logs')
+    .select('date_key, entries')
+    .eq('user_id', uid);
+  if (!data) return {};
+  return Object.fromEntries(data.map(r => [r.date_key, r.entries]));
 }
-function loadUsers() {
-  try { return JSON.parse(localStorage.getItem("otj_users") || "{}"); } catch { return {}; }
-}
-function saveUsers(u) {
-  try { localStorage.setItem("otj_users", JSON.stringify(u)); } catch { }
-}
-function loadLog(uid) {
-  try { return JSON.parse(localStorage.getItem(`otj_log_${uid}`) || "{}"); } catch { return {}; }
-}
-function saveLog(uid, l) {
-  try { localStorage.setItem(`otj_log_${uid}`, JSON.stringify(l)); } catch { }
+
+async function syncLog(uid, dateKey, entries) {
+  await supabase
+    .from('practice_logs')
+    .upsert(
+      { user_id: uid, date_key: dateKey, entries, updated_at: new Date().toISOString() },
+      { onConflict: 'user_id,date_key' }
+    );
 }
 
 // ─── Global CSS ───────────────────────────────────────────────────────────────
@@ -256,50 +262,38 @@ function AuthScreen({ onAuth }) {
     return e;
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     const e = validate();
     if (Object.keys(e).length) { setErrors(e); return; }
     setLoading(true);
     setErrors({});
 
-    setTimeout(() => {
-      const users = loadUsers();
-      if (mode === "signup") {
-        if (users[email]) { setErrors({ email: "An account with this email already exists" }); setLoading(false); return; }
-        const user = { uid: `u_${Date.now()}`, name: name.trim(), email, avatar: null, provider: "email", createdAt: new Date().toISOString() };
-        users[email] = { ...user, passwordHash: btoa(password) };
-        saveUsers(users);
-        saveAuth(user);
-        onAuth(user);
-      } else if (mode === "signin") {
-        const found = users[email];
-        if (!found || found.passwordHash !== btoa(password)) { setErrors({ password: "Incorrect email or password" }); setLoading(false); return; }
-        const user = { uid: found.uid, name: found.name, email: found.email, avatar: found.avatar, provider: found.provider, createdAt: found.createdAt };
-        saveAuth(user);
-        onAuth(user);
-      } else {
-        setForgotSent(true);
-        setLoading(false);
-      }
-    }, 900);
+    if (mode === "signup") {
+      const { data, error } = await supabase.auth.signUp({
+        email, password,
+        options: { data: { full_name: name.trim() } },
+      });
+      if (error) { setErrors({ email: error.message }); setLoading(false); return; }
+      onAuth(mapUser(data.user));
+    } else if (mode === "signin") {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) { setErrors({ password: "Incorrect email or password" }); setLoading(false); return; }
+      onAuth(mapUser(data.user));
+    } else {
+      const { error } = await supabase.auth.resetPasswordForEmail(email);
+      if (error) { setErrors({ email: error.message }); setLoading(false); return; }
+      setForgotSent(true);
+      setLoading(false);
+    }
   };
 
-  const handleGoogle = () => {
+  const handleGoogle = async () => {
     setGoogleLoading(true);
-    setTimeout(() => {
-      const users = loadUsers();
-      const googleEmail = `demo.google.user@gmail.com`;
-      let user;
-      if (users[googleEmail]) {
-        user = { uid: users[googleEmail].uid, name: users[googleEmail].name, email: googleEmail, avatar: users[googleEmail].avatar, provider: "google", createdAt: users[googleEmail].createdAt };
-      } else {
-        user = { uid: `u_${Date.now()}`, name: "Google User", email: googleEmail, avatar: "https://lh3.googleusercontent.com/a/default-user", provider: "google", createdAt: new Date().toISOString() };
-        users[googleEmail] = { ...user };
-        saveUsers(users);
-      }
-      saveAuth(user);
-      onAuth(user);
-    }, 1200);
+    await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: window.location.origin },
+    });
+    // Page will redirect — auth state picked up by onAuthStateChange on return
   };
 
   if (forgotSent) {
@@ -419,21 +413,13 @@ function AccountScreen({ user, log, onSignOut, onUpdateUser }) {
   const initials = (user?.name || "?").split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2);
   const memberSince = user?.createdAt ? new Date(user.createdAt).toLocaleDateString("en-US", { month: "long", year: "numeric" }) : "Today";
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!name.trim()) return;
     setSaving(true);
-    setTimeout(() => {
-      const users = loadUsers();
-      if (user?.email && users[user.email]) {
-        users[user.email].name = name.trim();
-        saveUsers(users);
-      }
-      const updated = { ...user, name: name.trim() };
-      saveAuth(updated);
-      onUpdateUser(updated);
-      setEditing(false);
-      setSaving(false);
-    }, 500);
+    await supabase.auth.updateUser({ data: { full_name: name.trim() } });
+    onUpdateUser({ ...user, name: name.trim() });
+    setEditing(false);
+    setSaving(false);
   };
 
   return (
@@ -743,17 +729,33 @@ export default function App() {
 
   // Boot: check existing session
   useEffect(() => {
-    const existing = loadAuth();
     const hasSeenOnboarding = localStorage.getItem("otj_onboarded");
-    if (existing) {
-      setUser(existing);
-      setLog(loadLog(existing.uid));
-      setAuthState("app");
-    } else if (hasSeenOnboarding) {
-      setAuthState("app"); // guest
-    } else {
-      setAuthState("onboarding");
-    }
+
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      if (session?.user) {
+        const u = mapUser(session.user);
+        setUser(u);
+        const l = await fetchLog(u.uid);
+        setLog(l);
+        setAuthState("app");
+      } else if (hasSeenOnboarding) {
+        setAuthState("app"); // guest
+      } else {
+        setAuthState("onboarding");
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (session?.user) {
+        const u = mapUser(session.user);
+        setUser(u);
+        const l = await fetchLog(u.uid);
+        setLog(l);
+        setAuthState("app");
+      }
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   const handleOnboardingDone = () => {
@@ -761,10 +763,11 @@ export default function App() {
     setAuthState("auth");
   };
 
-  const handleAuth = (u) => {
+  const handleAuth = async (u) => {
     if (u) {
       setUser(u);
-      setLog(loadLog(u.uid));
+      const l = await fetchLog(u.uid);
+      setLog(l);
     } else {
       setUser(null);
       setLog({});
@@ -772,12 +775,12 @@ export default function App() {
     setAuthState("app");
   };
 
-  const handleSignOut = (action) => {
+  const handleSignOut = async (action) => {
     if (action === "signin") {
       setAuthState("auth");
       return;
     }
-    saveAuth(null);
+    await supabase.auth.signOut();
     setUser(null);
     setLog({});
     setView("home");
@@ -798,7 +801,7 @@ export default function App() {
   }, [log, todayKey]);
 
   const handleComplete = useCallback((practice) => {
-    const uid = user?.uid || "guest";
+    const uid = user?.uid;
     setLog(prev => {
       const cur = prev[todayKey] || [];
       const already = cur.some(e => e.id === practice.id);
@@ -806,7 +809,7 @@ export default function App() {
         ? cur.filter(e => e.id !== practice.id)
         : [...cur, { id: practice.id, emoji: practice.emoji, title: practice.title, category: practice.category, duration: practice.duration }];
       const next = { ...prev, [todayKey]: updated };
-      saveLog(uid, next);
+      if (uid) syncLog(uid, todayKey, updated);
       if (!already) { setToast(`${practice.emoji} Added to your journal`); setTimeout(() => setToast(null), 2600); }
       return next;
     });

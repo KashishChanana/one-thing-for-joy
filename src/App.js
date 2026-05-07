@@ -979,13 +979,15 @@ export default function App() {
         setLog(l);
         setAuthState("app");
       } else if (hasSeenOnboarding) {
-        setAuthState("app"); // guest
+        setAuthState("app");
       } else {
         setAuthState("onboarding");
       }
+    }).catch(() => {
+      setAuthState(localStorage.getItem("otj_onboarded") ? "app" : "onboarding");
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       if (session?.user) {
         const u = mapUser(session.user);
         setUser(u);

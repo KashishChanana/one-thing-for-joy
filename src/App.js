@@ -970,34 +970,43 @@ export default function App() {
   // Boot: check existing session
   useEffect(() => {
     const hasSeenOnboarding = localStorage.getItem("otj_onboarded");
+    const fallback = () => setAuthState(hasSeenOnboarding ? "app" : "onboarding");
 
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      if (session?.user) {
-        const u = mapUser(session.user);
-        setUser(u);
-        const l = await fetchLog(u.uid);
-        setLog(l);
-        setAuthState("app");
-      } else if (hasSeenOnboarding) {
-        setAuthState("app");
-      } else {
-        setAuthState("onboarding");
-      }
-    }).catch(() => {
-      setAuthState(localStorage.getItem("otj_onboarded") ? "app" : "onboarding");
-    });
+    try {
+      supabase.auth.getSession().then(async ({ data: { session } }) => {
+        try {
+          if (session?.user) {
+            const u = mapUser(session.user);
+            setUser(u);
+            const l = await fetchLog(u.uid);
+            setLog(l);
+            setAuthState("app");
+          } else if (hasSeenOnboarding) {
+            setAuthState("app");
+          } else {
+            setAuthState("onboarding");
+          }
+        } catch { fallback(); }
+      }).catch(fallback);
+    } catch { fallback(); }
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session?.user) {
-        const u = mapUser(session.user);
-        setUser(u);
-        const l = await fetchLog(u.uid);
-        setLog(l);
-        setAuthState("app");
-      }
-    });
+    let subscription;
+    try {
+      const { data } = supabase.auth.onAuthStateChange(async (_event, session) => {
+        if (session?.user) {
+          try {
+            const u = mapUser(session.user);
+            setUser(u);
+            const l = await fetchLog(u.uid);
+            setLog(l);
+            setAuthState("app");
+          } catch {}
+        }
+      });
+      subscription = data.subscription;
+    } catch {}
 
-    return () => subscription.unsubscribe();
+    return () => subscription?.unsubscribe();
   }, []);
 
   const handleOnboardingDone = () => {
